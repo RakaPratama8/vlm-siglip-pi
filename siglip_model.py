@@ -3,28 +3,6 @@ import torch
 import torch.nn as nn
 
 class SiglipVisionConfig:
-    """
-    Class SiglipVisionConfig digunakan untuk mengonfigurasi parameter-parameter dari model Vision Transformer 
-    yang digunakan dalam sistem Siglip. Class ini menyediakan berbagai atribut yang dapat disesuaikan 
-    untuk mengatur arsitektur dan performa model.
-    
-    Attributes:
-        hidden_size (int): Ukuran dari vektor embeddings yang dihasilkan oleh vision transformer. 
-        intermediate_size (int): Ukuran dari linear layer pada feed-forward network. 
-        num_hidden_layers (int): Jumlah hidden layers pada transformer.
-        num_attention_head (int): Jumlah attention heads pada Multi-Head Attention (MHA) 
-            di setiap layer.
-        num_channels (int): Jumlah channels pada input gambar. Contoh: RGB memiliki 3 channels. 
-        image_size (int): Resolusi gambar input dalam piksel (panjang/lebar). Model ini mendukung 
-            gambar dengan ukuran 224x224, 448x448, dan 896x896 piksel.
-        patch_size (int): Ukuran patch gambar dalam piksel (panjang/lebar).
-        layer_norm_eps (float): Nilai epsilon untuk stabilitas pada layer normalization. 
-        attention_droupout (float): Tingkat dropout yang diterapkan pada mekanisme attention. 
-        num_image_tokens (int, optional): Jumlah image tokens yang dihasilkan dari patch. 
-            Nilai ini dapat dihitung berdasarkan ukuran gambar dan ukuran patch jika tidak diberikan.
-        **kwargs: Parameter tambahan yang dapat digunakan untuk konfigurasi lebih lanjut.
-    """
-    
     def __init__(
         self,
         hidden_size = 768,
@@ -51,22 +29,68 @@ class SiglipVisionConfig:
         self.layer_norm_eps = layer_norm_eps
         self.attention_droupout = attention_droupout
         self.num_image_tokens = num_image_tokens
+
+class SiglipVisionEmbeddings(nn.Module):
+    def __init__(
+        self,
+        config=SiglipVisionConfig
+    ):
+        super().__init__()
         
-class SiglipVisionModel(nn.Module):
-    """
-    Kelas `SiglipVisionModel` adalah turunan dari `nn.Module` yang digunakan untuk membangun model penglihatan (vision model) menggunakan PyTorch.
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.image_size = config.image_size
+        self.patch_size = config.patch_size
+        
+        self.patch_embedding = nn.Conv2d(
+            in_channels=config.num_channels,
+            out_channels=self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            padding="valid",
+        )
+        
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.num_positions = self.num_patches
+        self.position_embedding = nn.Embedding(
+            num_embeddings=self.num_positions,
+            embedding_dim=self.embed_dim,
+        )
+        
+        self.register_buffer(
+            name="position_ids",
+            tensor=torch.arange(self.num_positions).expand((1, -1)),
+            persistent=False,
+        )
+
+class SiglipEncoder(nn.Module):
+    pass
+        
+class SiglipVisionTransformer(nn.Module):
+    def __init__(
+        self,
+        config=SiglipVisionConfig
+    ):
+        super().__init__()
+        
+        self.config = config
+        embed_dim = config.hidden_size
+        
+        self.embeddings = SiglipVisionEmbeddings(config)
+        self.encoder = SiglipEncoder(config)
+        self.post_layernorms = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
     
-    ## Attributes:
-        config (SiglipVisionConfig): Objek konfigurasi yang berisi parameter untuk vision model.
-        vision_model (SiglipVisionTransformer): Model vision transformer yang diinisialisasi dengan konfigurasi yang diberikan.
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         
-    ## Methods:
-        forward(pixel_values: Any) -> Tuple:
-            Memproses nilai pixel input melalui model vision transformer dan mengembalikan output.
-            
-    ## Args:
-        config (SiglipVisionConfig): Objek konfigurasi yang digunakan untuk menginisialisasi model vision transformer.
-    """
+        hidden_states = self.embeddings(pixel_values)
+        
+        last_hidden_state = self.encoder(input_embeds=hidden_states)
+        
+        last_hidden_state = self.post_layernorms(last_hidden_state)
+        
+        return last_hidden_state
+
+class SiglipVisionModel(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig
