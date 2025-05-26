@@ -8,7 +8,7 @@ class SiglipVisionConfig:
         hidden_size = 768,
         intermediate_size = 3072,
         num_hidden_layers = 12,
-        num_attention_head = 12,
+        num_attention_heads = 12,
         num_channels = 3,
         image_size = 224,
         patch_size = 16,
@@ -22,7 +22,7 @@ class SiglipVisionConfig:
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
-        self.num_attention_head = num_attention_head
+        self.num_attention_heads = num_attention_heads
         self.num_channels = num_channels
         self.image_size = image_size
         self.patch_size = patch_size
@@ -99,7 +99,38 @@ class SiglipMLP(nn.Module):
         return hidden_states
 
 class SiglipAttention(nn.Module):
-    pass
+    def __init__ (
+        self,
+        config=SiglipVisionConfig
+    ):
+        super().__init__()
+        
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        self.scale = self.head_dim**-0.5 # 1/sqrt(self.head_dim)
+        self.dropout = config.attention_droupout
+        
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        
+        # hidden states: [Batch_Size, Num_Patches, Embed_Dim]
+        batch_size, seq_len, _ = hidden_states.size()
+        
+        # query states: [Batch_Size, Num_Patches, Embed_Dim]
+        query_states = self.q_proj(hidden_states)
+        # key states: [Batch_Size, Num_Patches, Embed_Dim]
+        key_states = self.k_proj(hidden_states)
+        # value states: [Batch_Size, Num_Patches, Embed_Dim]
+        value_states = self.v_proj(hidden_states)
 
 class SiglipEncoderLayer(nn.Module):
     def __init__ (
