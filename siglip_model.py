@@ -124,13 +124,42 @@ class SiglipAttention(nn.Module):
         
         # hidden states: [Batch_Size, Num_Patches, Embed_Dim]
         batch_size, seq_len, _ = hidden_states.size()
-        
         # query states: [Batch_Size, Num_Patches, Embed_Dim]
         query_states = self.q_proj(hidden_states)
         # key states: [Batch_Size, Num_Patches, Embed_Dim]
         key_states = self.k_proj(hidden_states)
         # value states: [Batch_Size, Num_Patches, Embed_Dim]
         value_states = self.v_proj(hidden_states)
+        
+        query_states = query_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # attention formula = ( Q * K^T ) / sqrt(dim)
+        # attn_weights : [Batch_Size, Num_Heads, Num_Patches, HeaNum_Patches]
+        attn_weights = (torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale)
+        
+        if attn_weights.size() != (batch_size, self.num_heads, seq_len, seq_len):
+            raise ValueError(
+                f"Attention weights should be in {(batch_size, self.num_heads, seq_len, seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+        
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights =  nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        
+        attn_output = torch.matmul(attn_weights, value_states)
+        if attn_output.size() != (batch_size, self.num_heads, seq_len, self.head_dim):
+            raise ValueError(
+                f"Attention's output should be in {(batch_size, self.num_heads, seq_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+        
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
+        attn_output = self.out_proj(attn_output)
+        
+        return attn_output, attn_weights
 
 class SiglipEncoderLayer(nn.Module):
     def __init__ (
@@ -165,7 +194,23 @@ class SiglipEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         
         return hidden_states
+
+class SiglipEncoder(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.config = config
+        self.layers = nn.ModuleList(
+            [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
+        ) 
+    
+    def forward(self, input_embeds: torch.Tensor) -> torch.Tensor:
+        hidden_states = input_embeds
         
+        for encoder_layer in self.layers:
+            hidden_states = encoder_layer(hidden_states)
+        
+        return hidden_states
+
 class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
@@ -175,8 +220,9 @@ class SiglipVisionTransformer(nn.Module):
         
         self.config = config
         embed_dim = config.hidden_size
+        
         self.embeddings = SiglipVisionEmbeddings(config)
-        self.encoder = SiglipEncoderLayer(config)
+        self.encoder = SiglipEncoder(config)
         self.post_layernorms = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
     
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
