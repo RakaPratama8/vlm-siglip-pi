@@ -1,7 +1,8 @@
-from typing import Dict, List, Optional, Union, Tuple, Iterable
+from typing import Dict, Iterable, List, Optional, Tuple, Union
+
 import numpy as np
-from PIL import Image
 import torch
+from PIL import Image
 
 IMAGENET_STANDARD_MEAN = [0.5, 0.5, 0.5]
 IMAGENET_STANDARD_STD = [0.5, 0.5, 0.5]
@@ -19,7 +20,7 @@ def resize(
 ) -> np.ndarray:
     height, width = size
     resized_image = image.resize(
-    (width, height), resample=resample, reducing_gap=reducing_gap
+        (width, height), resample=resample, reducing_gap=reducing_gap
     )
     
     return resized_image
