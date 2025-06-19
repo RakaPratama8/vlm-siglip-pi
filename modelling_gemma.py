@@ -71,7 +71,37 @@ class PaliGemmaConfig():
         self.text_config.num_image_tokens = (self.vision_config.image_size // self.vision_config.patch_size) ** 2
         self.vision_config.projection_dim = projection_dim
 
+class GemmaForCausalLM(nn.Module):
+    
+    def __init__ (self, config):
+        super().__init__()
+        self.config = config
+        self.model = GemmaModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+    
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+    
+    def forward(
+        self,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        kv_cache: Optional[KVCache] = None,
+    ) -> Tuple:
+        pass
 
+class PaliGemmaMultiModalProjector(nn.Module):
+    def __init__(self, config: PaliGemmaConfig):
+        super().__init__()
+        self.linear = nn.Linear(config.vision_config.hidden_size, config.vision_config.projection_dim, bias=True)
+        
+    def forward(self, image_features):
+        # [Batch_size, Num_patches, Embed_dim] -> [Batch_Size, Num_Patches, Projection_Dim]
+        hidden_states = self.linear(image_features)
+        return hidden_states
+        
 class PaliGemmaForConditionalGeneration(nn.Module):
     def __init__(
         self,
@@ -125,7 +155,42 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         # Zero out padding tokens
         final_embedding = torch.where(pad_mask_expanded, torch.zeros_like(final_embedding), final_embedding)
         
-        # i will continue to code kv cache part
+        # Creating attention mask
+        dtype, device = inputs_embeds.dtype, inputs_embeds.device
+        min_dtype = torch.finfo(dtype).min
+        q_len = inputs_embeds.shape[1]
+        
+        if kv_cache is None or kv_cache.num_items() == 0:
+            # Dont mask any token, cause this is a Prefill phase
+            # This only work when the embeddings doesnt have any paddings
+            causal_mask = torch.full(
+                (batch_size, q_len, q_len), fill_value=0, dtype=dtype, device=device
+            )
+        else:
+            # Since i generating tokens, the query must be one single token
+            assert q_len == 1
+            kv_len = kv_cache.num_items() + q_len
+            # in this phase, we dont need to mask anything, because all query should be able to attend all previous tokens
+            # Only work when we have no padding
+            causal_mask = torch.full(
+                (batch_size, q_len, kv_len), fill_value=0, dtype=dtype, device=device
+            )
+        
+        # add the head dim
+        # [Batch_Size, Q_Len, KV_Len] -> [Batch_size, Num_heads_Q, Q_Len, KV_Len]
+        causal_mask = causal_mask.unsqueeze(1)
+        
+        if kv_cache is not None and kv_cache.num_items > 0:
+            # The position of the query is just a last position
+            position_ids = attention_mask.cumsum(-1)[:, -1]
+            if position_ids.dim() == 1:
+                position_ids = position_ids.unsqueeze(0)
+        else:
+            # Create position_ids based on attention_mask
+            # for masked tokens, use number 1 as position
+            position_ids = (attention_mask.cumsum(-1)).masked_fill_((attention_mask == 0), 1).to(device)
+        
+        return final_embedding, causal_mask, position_ids
         
     def forward(
         self,
