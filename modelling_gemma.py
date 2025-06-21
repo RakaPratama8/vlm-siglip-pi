@@ -71,6 +71,84 @@ class PaliGemmaConfig():
         self.text_config.num_image_tokens = (self.vision_config.image_size // self.vision_config.patch_size) ** 2
         self.vision_config.projection_dim = projection_dim
 
+class GemmaRMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.zeros(dim))
+    
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float())
+        output = output * (1.0 + self.weight.float())
+        
+        return output.type_as(x)
+
+class GemmaMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        
+    def forward(self, x):
+        # Equivalent to:
+        # y = self.gate_proj(x)
+        # y = torch.gelu(y, approximate="tanh")
+        # j = self.up_proj(x)
+        # z = y * j
+        # z = self.down_proj(z)
+        return self.down_proj(nn.functional.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x))
+
+class GemmaDecoderLayer(nn.Module):
+    def __init__(self, config: GemmaConfig, layer_idx: int):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+
+        self.self_attn = GemmaAttention(config=config, layer_idx=layer_idx)
+        
+        self.mlp = GemmaMLP(config)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        kv_cache: Optional[KVCache] = None,
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        residual = hidden_states
+        
+        # [Batch_Size, Seq_Len, Hidden_Size]
+        hidden_states = self.input_layernorm(hidden_states)
+        
+        # [Batch_Size, Seq_Len, Hidden_Size]
+        hidden_states, _, = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            kv_cache=kv_cache,
+        )
+        # [Batch_Size, Seq_Len, Hidden_Size]
+        hidden_states = residual + hidden_states
+        
+        # [Batch_Size, Seql_Len, Hidden_Size]
+        residual = hidden_states
+        # [Batch_Size, Seql_Len, Hidden_Size]
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        # [Batch_Size, Seql_Len, Hidden_Size]
+        hidden_states = self.mlp(hidden_states)
+        # [Batch_Size, Seql_Len, Hidden_Size]
+        hidden_states = residual + hidden_states
+        
+        return hidden_states
+
 class GemmaModel(nn.Module):
     
     def __init__(self, config: GemmaConfig):
@@ -115,8 +193,6 @@ class GemmaModel(nn.Module):
         
         # [Batch_Size, Seq_Len, Hidden_Size]
         return hidden_states
-
-
         
 class GemmaForCausalLM(nn.Module):
     
@@ -129,6 +205,9 @@ class GemmaForCausalLM(nn.Module):
     
     def get_input_embeddings(self):
         return self.model.embed_tokens
+    
+    def tie_weights(self):
+        self.lm_head.weight = self.model.embed_tokens.weight
     
     def forward(
         self,
@@ -188,7 +267,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         
     def tie_weights(self):
-        return self.language_model.tie_weight()
+        return self.language_model.tie_weights()
     
     def _merge_input_ids_with_image_features(
         self,
