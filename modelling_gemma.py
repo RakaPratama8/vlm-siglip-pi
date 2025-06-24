@@ -137,6 +137,15 @@ class GemmaMLP(nn.Module):
         # z = self.down_proj(z)
         return self.down_proj(nn.functional.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x))
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    
+    if n_rep == 1:
+        return hidden_states
+    
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 class GemmaAttention(nn.Module):
     def __init__(self, config: GemmaConfig, layer_idx: Optional[int] = None):
         super().__init__()
@@ -196,7 +205,41 @@ class GemmaAttention(nn.Module):
         if kv_cache is not None:
             key_states, value_states = kv_cache.update(key_states, value_states, self.layer_idx)
         
+        # repeat komponen "keys" dan "values" untuk mencocokan dengan jumlah heads dari "query"
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
         
+        # melakukan perhitungan attention, Q * K^T / sqrt(head_dim). Shape: [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        
+        assert attention_mask is not None
+        attn_weights = attn_weights + attention_mask
+        
+        # applying softmax
+        # [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        
+        #applying dropout
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        
+        # Dikalikan dengan "values". [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV] x [Batch_Size, Num_Heads_KV, Seq_Len_KV, Head_Dim] -> [Batch_Size, Num_Heads_Q, Seq_Len_Q, Head_Dim]
+        attn_output = torch.matmul(attn_weights, value_states)
+        
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be the size of {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+        
+        # Pastikan seq_len adalah "the second dimension" (di dimensi kedua) # [Batch_Size, Num_Heads_Q, Seq_Len_Q, Head_Dim] -> [Batch_Size, Seq_Len_Q, Num_Heads_Q, Head_Dim]
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        # concatenate semua "heads" bersamaan. Size: [Batch_Size, Seq_Len_Q, Num_Heads_Q, Head_Dim] -> [Batch_Size, Seq_Len_Q, Num_Heads_Q * Head_Dim]
+        attn_output = attn_output.view(bsz, q_len, -1)
+        
+        # Multiply dengan Wo. Size: [Batch_Size, Seq_Len_Q, Hidden_Size]
+        attn_output = self.o_proj(attn_output)
+        
+        return attn_output, attn_weights
         
 class GemmaDecoderLayer(nn.Module):
     def __init__(self, config: GemmaConfig, layer_idx: int):
